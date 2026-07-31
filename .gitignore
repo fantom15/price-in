@@ -1,0 +1,14 @@
+# Raw chat transcript - contains session cookies and a real qsid
+first-history.md
+
+# Credentials
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
