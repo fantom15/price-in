@@ -21,7 +21,13 @@ snapshots already on disk without re-fetching.
 
 Each CSV row is one (bank, as_of, meeting) triple:
 
-    bank,as_of,meeting,implied_rate,prob_move_pct,is_cut,num_moves,change_bps,horizon
+    bank,as_of,as_of_time,meeting,implied_rate,prob_move_pct,is_cut,num_moves,change_bps,horizon
+
+`as_of_time` is the api's `generated_at_utc` for the primary `today` snapshot -
+a precise UTC instant recording WHEN the reading was taken, so staleness is
+detectable downstream. It is empty for backdated (ago_*) rows, which the server
+reconstructs and does not stamp. (Do not confuse this with the bare `as_of`
+DATE, which is all the ago_* blocks carry.)
 
 `prob_move_pct` and `num_moves` are signed here (negative = cut) - the api
 reports magnitude plus a separate `prob_is_cut`/`num_moves_is_cut` flag, which
@@ -31,6 +37,7 @@ Usage:
     python3 rates.py                       # all banks -> data/rates.csv
     python3 rates.py --banks fed ecb boc
     python3 rates.py --no-fetch            # rebuild csv from the archive only
+                                           # (backfills as_of_time for old rows)
 """
 import argparse
 import csv
@@ -55,8 +62,9 @@ AGO_KEYS = ["ago_1w", "ago_3w", "ago_6w", "ago_10w"]
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
 
-FIELDS = ["bank", "as_of", "meeting", "implied_rate", "prob_move_pct",
-          "is_cut", "num_moves", "change_bps", "horizon"]
+# CHANGED: added as_of_time (second position, right after the as_of date).
+FIELDS = ["bank", "as_of", "as_of_time", "meeting", "implied_rate",
+          "prob_move_pct", "is_cut", "num_moves", "change_bps", "horizon"]
 
 
 def fetch(bank, timeout=60):
@@ -82,6 +90,17 @@ def as_of_date(block):
     return str(v).replace("T", " ").split()[0]
 
 
+def as_of_time(doc):  # NEW
+    """The precise instant the api generated this response.
+
+    `generated_at_utc` (e.g. "2026-07-29T04:01:10.012Z") is one consistent UTC
+    field present at the top level of every bank's payload - cleaner than the
+    per-bank `as_of` formats, and the value staleness checks actually want.
+    Only meaningful for the primary `today` snapshot; returned as-is (ISO UTC).
+    """
+    return doc.get("generated_at_utc") or ""
+
+
 def snapshots(doc):
     """Yield (as_of, horizon, rows) for today plus each backdated block."""
     for key in ["today"] + AGO_KEYS:
@@ -94,6 +113,7 @@ def snapshots(doc):
 
 
 def to_rows(bank, doc):
+    gen_time = as_of_time(doc)  # NEW: one timestamp per response (the `today` read)
     for as_of, horizon, rows in snapshots(doc):
         for r in rows:
             meeting = r.get("meeting_iso")
@@ -105,6 +125,9 @@ def to_rows(bank, doc):
             yield {
                 "bank": bank,
                 "as_of": as_of,
+                # NEW: stamp only the primary observation; ago_* are
+                # server reconstructions and carry no generation instant.
+                "as_of_time": gen_time if horizon == "today" else "",
                 "meeting": meeting,
                 "implied_rate": r.get("implied_rate_post_meeting"),
                 "prob_move_pct": None if prob is None else (-prob if cut else prob),

@@ -1,5 +1,14 @@
+# Fetched data lives on the VPS, not in git. The archive under data/raw/ is
+# irreplaceable (a missed day cannot be backfilled) - back it up there, since
+# nothing here does it for you. See "Data on the VPS" in the README.
+data/
+market_data.csv
+
 # Raw chat transcript - contains session cookies and a real qsid
 first-history.md
+
+# Superseded local copy of rates.py
+rates1.py
 
 # Credentials
 .env

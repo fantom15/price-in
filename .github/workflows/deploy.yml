@@ -1,0 +1,50 @@
+name: Deploy to VPS
+
+# Deploy-on-push. The VPS runs the fetchers itself on a cron/systemd timer;
+# this workflow only updates the code there. Fetched data lives on the VPS
+# and is never committed - see "Data on the VPS" in the README.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:        # manual "Run workflow" button
+
+concurrency:
+  # Never let two deploys touch the checkout at once.
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # The fetchers are stdlib-only, so there is nothing to install. Compile
+      # them so a syntax error is caught here rather than at 06:00 on the VPS.
+      - run: python -m compileall -q quikstrike.py rates.py build_sheet.py
+
+  deploy:
+    needs: syntax-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd ${{ secrets.VPS_PATH }}
+
+            # Match the remote exactly. The VPS is a deploy target, not a
+            # place to edit code - any local change is discarded. data/ is
+            # gitignored, so this never touches the accumulated archive.
+            git fetch --prune origin
+            git reset --hard origin/master
+
+            python3 -m compileall -q rates.py build_sheet.py quikstrike.py
+            echo "deployed $(git rev-parse --short HEAD) at $(date -u +%FT%TZ)"

@@ -2,9 +2,9 @@
 
 Fetchers for the `market_data_template` sheet.
 
-> **Keep this repository private.** `data/` contains CME licensed market data
-> pulled from QuikStrike. That is fine for personal analysis, but republishing
-> it — which a public repo does — is redistribution. See
+> **Keep this repository private.** `data/` is no longer tracked, but the
+> initial commit contained CME licensed market data, so it remains in git
+> history. Publishing this repo would still redistribute it. See
 > [Licensing](#licensing) before changing visibility or sharing a clone.
 
 ## Setup
@@ -104,12 +104,52 @@ Two consequences worth remembering:
   CVOL and `CASK` under skew (`VY`/`SY` for Treasuries). `build_sheet.py`
   matches on the stem, via `root()`.
 
+## Deployment
+
+`.github/workflows/deploy.yml` deploys to the VPS on every push to `master`
+(and via the manual "Run workflow" button). It syntax-checks the fetchers, then
+SSHes in and does `git fetch` + `git reset --hard origin/master`.
+
+Required repo secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `VPS_HOST` | hostname or IP |
+| `VPS_USER` | ssh user |
+| `VPS_SSH_KEY` | **private** key, full PEM including header/footer lines |
+| `VPS_PATH` | path to the checkout, e.g. `/srv/price-in` |
+| `VPS_PORT` | optional, defaults to 22 |
+
+The VPS needs a clone at `VPS_PATH` before the first deploy:
+
+```bash
+git clone https://github.com/fantom15/price-in.git /srv/price-in
+```
+
+Note the deploy uses `reset --hard`: the VPS is a deploy target, not somewhere
+to edit code — local changes there are discarded. `data/` is gitignored, so the
+accumulated archive is never touched.
+
+## Data on the VPS
+
+`data/` and `market_data.csv` are **not tracked in git** — the fetched data
+lives on the VPS only, and each machine keeps its own.
+
+This matters most for `data/raw/`. Those rateprobability snapshots are
+irreplaceable: the API exposes only today plus 1w/3w/6w/10w ago, so a day
+without a run is a permanent gap that cannot be backfilled. Nothing in this
+repo backs that directory up — arrange that on the VPS.
+
+Deploying does not run anything. Scheduling the daily fetch on the VPS is a
+separate step, still to be set up.
+
 ## Licensing
 
-The CSVs under `data/` are **CME licensed market data**, committed here so the
-sheet is reproducible without a live QuikStrike session. Fine for personal
-analysis — but that is why this repo should stay **private**. Making it public,
-or sharing a clone, redistributes licensed data.
+The CSVs under `data/` are **CME licensed market data**. They are gitignored
+now, but the initial commit included them, so they persist in git history —
+which is why this repo should stay **private**. Making it public, or sharing a
+clone, redistributes licensed data. (Scrubbing history with `git filter-repo`
+would be the fix if that ever needs to change.)
 
 If this ever feeds something redistributed or commercial, pull from
 [CME DataMine](https://datamine.cmegroup.com/#/datasets/volindx) instead, which
