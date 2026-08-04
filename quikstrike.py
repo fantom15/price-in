@@ -39,12 +39,6 @@ _PREFIX = ("ctl00$MainContent$ucViewControl_IntegratedVolIndexDashboard"
            "$ucViewControl")
 _ITEM_PICKER = _PREFIX + "$ucVolIndexItemPicker$lvFamilyItems"
 
-# Switches the dashboard to the chart view. The value picker only exists on
-# that view - land on the tile/dashboard view and `ucValuePicker` is absent
-# from the page entirely, so the measure postback below silently does nothing
-# and the response comes back with sparklines instead of the history chart.
-CHART_VIEW = _PREFIX + "$ucViewPicker$lbChart"
-
 # Each measure is its own link button in the value picker.
 MEASURES = {
     "cvol":      _PREFIX + "$ucValuePicker$lbCVolIndex",
@@ -80,31 +74,9 @@ def _post(url, fields, timeout):
         return r.read().decode("utf-8", "replace")
 
 
-def _fields(target, all_products):
-    """Postback body for clicking one link button."""
-    fields = [("ctl00$smPublic", f"ctl00$upMain|{target}")]
-    if all_products:
-        for fam, count in FAMILY_SIZES.items():
-            for i in range(count):
-                fields.append(
-                    (f"{_ITEM_PICKER}$ctrl{fam}$lvItems$ctrl{i}$chkItem", "on"))
-    return fields + [
-        ("__EVENTTARGET", target),
-        ("__EVENTARGUMENT", ""),
-        ("__VIEWSTATEGENERATOR", "7E260167"),
-        ("__ASYNCPOST", "true"),
-    ]
-
-
 def fetch(qsid, insid, measure="cvol", all_products=True, timeout=180):
-    """Select the chart view, then the measure; return the delta response.
-
-    Two postbacks, because the dashboard keeps the current view in server-side
-    session state and the value picker is only rendered on the chart view. If
-    the session happens to be sitting on the tile view, posting the measure
-    alone targets a control that is not on the page - the request succeeds but
-    returns the tile sparklines, with no history chart in it.
-    """
+    """Post the measure selection and return the raw delta response."""
+    target = MEASURES[measure]
     qs = urllib.parse.urlencode({
         "viewitemid": "IntegratedVolIndexDashboard",
         "insid": insid,
@@ -112,24 +84,28 @@ def fetch(qsid, insid, measure="cvol", all_products=True, timeout=180):
     })
     url = f"{BASE}?{qs}"
 
-    _post(url, _fields(CHART_VIEW, all_products), timeout)
-    return _post(url, _fields(MEASURES[measure], all_products), timeout)
+    fields = [("ctl00$smPublic", f"ctl00$upMain|{target}")]
+    if all_products:
+        for fam, count in FAMILY_SIZES.items():
+            for i in range(count):
+                fields.append(
+                    (f"{_ITEM_PICKER}$ctrl{fam}$lvItems$ctrl{i}$chkItem", "on"))
+    fields += [
+        ("__EVENTTARGET", target),
+        ("__EVENTARGUMENT", ""),
+        ("__VIEWSTATEGENERATOR", "7E260167"),
+        ("__ASYNCPOST", "true"),
+    ]
+    return _post(url, fields, timeout)
 
 
 def extract_settings(doc):
     """Pull the JSONSettings blob out of the $create(...) call."""
     i = doc.find(COMPONENT)
     if i < 0:
-        # Distinguish the two ways this fails: an expired session returns a
-        # short login/redirect delta, while a live session on the wrong view
-        # returns a full page of tile sparklines. Saying "qsid expired" for
-        # both sends you chasing a credential that is perfectly fine.
-        hint = ("the qsid has most likely expired; reopen the dashboard and "
-                "copy a fresh one from the URL")
-        if "SparkChart" in doc:
-            hint = ("the session is alive but returned the tile view - the "
-                    "chart-view postback did not take effect")
-        raise SystemExit(f"chart component not found - {hint}")
+        raise SystemExit(
+            "chart component not found - the qsid has most likely expired; "
+            "reopen the dashboard and copy a fresh one from the URL")
     m = re.search(r'"JSONSettings":"', doc[i:])
     if not m:
         raise SystemExit("JSONSettings property not found in response")
