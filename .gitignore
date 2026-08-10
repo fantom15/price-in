@@ -1,7 +1,10 @@
-# Fetched data lives on the VPS, not in git. The archive under data/raw/ is
-# irreplaceable (a missed day cannot be backfilled) - back it up there, since
-# nothing here does it for you. See "Data on the VPS" in the README.
-data/
+# The large CVOL csvs are CME licensed data and re-fetchable from QuikStrike,
+# so they stay out of git. data/raw/ and data/cot.csv are tracked instead:
+# raw/ is irreplaceable (rateprobability exposes only 5 dates, so a missed day
+# is a permanent gap) and cot.csv is public CFTC data.
+data/*
+!data/raw/
+!data/cot.csv
 market_data.csv
 
 # Raw chat transcript - contains session cookies and a real qsid
