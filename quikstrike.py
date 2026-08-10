@@ -18,9 +18,18 @@ Environment:
     QS_QSID    session id from the dashboard URL (?qsid=...)
     QS_INSID   instrument id from the dashboard URL (?insid=...)
 
+The control ids depend on WHICH PAGE hosts the dashboard. CME moved CVOL inside
+the FedWatch page, so ids that used to start with
+`ucViewControl_IntegratedVolIndexDashboard$ucViewControl` are now
+`ucViewControl_IntegratedFedWatchTool$ucCVOLDashboardVC`. Use --view to match
+the `viewitemid` in the url you copied the qsid from; a mismatch fails silently
+(the server returns the currently selected measure for every request), so the
+run aborts if two measures come back with the same title.
+
 Usage:
     python3 quikstrike.py --measure cvol --out data/cvol.csv
     python3 quikstrike.py --all-measures --outdir data
+    python3 quikstrike.py --all-measures --view standalone
 """
 import argparse
 import csv
@@ -35,26 +44,38 @@ import urllib.request
 BASE = "https://cmegroup-tools.quikstrike.net/User/QuikStrikeView.aspx"
 COMPONENT = "UserControls.VolIndex.HistoryChart.Chart"
 
-_PREFIX = ("ctl00$MainContent$ucViewControl_IntegratedVolIndexDashboard"
-           "$ucViewControl")
-_ITEM_PICKER = _PREFIX + "$ucVolIndexItemPicker$lvFamilyItems"
-
-# Switches the dashboard to the chart view. The value picker only exists on
-# that view - land on the tile/dashboard view and `ucValuePicker` is absent
-# from the page entirely, so the measure postback below silently does nothing
-# and the response comes back with sparklines instead of the history chart.
-CHART_VIEW = _PREFIX + "$ucViewPicker$lbChart"
-
-# Each measure is its own link button in the value picker.
-MEASURES = {
-    "cvol":      _PREFIX + "$ucValuePicker$lbCVolIndex",
-    "skew":      _PREFIX + "$ucValuePicker$lbSkew",
-    "atm":       _PREFIX + "$ucValuePicker$lbATM",
-    "convexity": _PREFIX + "$ucValuePicker$lbConvexity",
-    "skewratio": _PREFIX + "$ucValuePicker$lbSkewRatio",
-    "upvar":     _PREFIX + "$ucValuePicker$lbUpVar",
-    "downvar":   _PREFIX + "$ucValuePicker$lbDownVar",
+# CME moved the CVOL dashboard: it is now embedded in the FedWatch page rather
+# than standing alone, which changes every control id. Both layouts are kept
+# because the standalone page may still be reachable - pass --view to switch.
+#
+# The failure mode when these do not match the page is silent: the measure
+# postback targets a control that is not there, the server returns whatever
+# measure is currently selected, and you get 7 identical CSVs with no error.
+VIEWS = {
+    "fedwatch": (
+        "IntegratedFedWatchTool",
+        "ctl00$MainContent$ucViewControl_IntegratedFedWatchTool"
+        "$ucCVOLDashboardVC",
+    ),
+    "standalone": (
+        "IntegratedVolIndexDashboard",
+        "ctl00$MainContent$ucViewControl_IntegratedVolIndexDashboard"
+        "$ucViewControl",
+    ),
 }
+DEFAULT_VIEW = "fedwatch"
+
+# Suffix of each measure's link button inside the value picker.
+MEASURE_BUTTONS = {
+    "cvol":      "lbCVolIndex",
+    "skew":      "lbSkew",
+    "atm":       "lbATM",
+    "convexity": "lbConvexity",
+    "skewratio": "lbSkewRatio",
+    "upvar":     "lbUpVar",
+    "downvar":   "lbDownVar",
+}
+MEASURES = sorted(MEASURE_BUTTONS)
 
 # Product families in the item picker, and how many items each contains.
 # Ticking every box widens the pull from the 8 default FX products to all 36
@@ -80,14 +101,15 @@ def _post(url, fields, timeout):
         return r.read().decode("utf-8", "replace")
 
 
-def _fields(target, all_products):
+def _fields(prefix, target, all_products):
     """Postback body for clicking one link button."""
+    picker = prefix + "$ucVolIndexItemPicker$lvFamilyItems"
     fields = [("ctl00$smPublic", f"ctl00$upMain|{target}")]
     if all_products:
         for fam, count in FAMILY_SIZES.items():
             for i in range(count):
                 fields.append(
-                    (f"{_ITEM_PICKER}$ctrl{fam}$lvItems$ctrl{i}$chkItem", "on"))
+                    (f"{picker}$ctrl{fam}$lvItems$ctrl{i}$chkItem", "on"))
     return fields + [
         ("__EVENTTARGET", target),
         ("__EVENTARGUMENT", ""),
@@ -96,7 +118,8 @@ def _fields(target, all_products):
     ]
 
 
-def fetch(qsid, insid, measure="cvol", all_products=True, timeout=180):
+def fetch(qsid, insid, measure="cvol", all_products=True, timeout=180,
+          view=DEFAULT_VIEW):
     """Select the chart view, then the measure; return the delta response.
 
     Two postbacks, because the dashboard keeps the current view in server-side
@@ -105,15 +128,18 @@ def fetch(qsid, insid, measure="cvol", all_products=True, timeout=180):
     alone targets a control that is not on the page - the request succeeds but
     returns the tile sparklines, with no history chart in it.
     """
+    viewitemid, prefix = VIEWS[view]
     qs = urllib.parse.urlencode({
-        "viewitemid": "IntegratedVolIndexDashboard",
+        "viewitemid": viewitemid,
         "insid": insid,
         "qsid": qsid,
     })
     url = f"{BASE}?{qs}"
 
-    _post(url, _fields(CHART_VIEW, all_products), timeout)
-    return _post(url, _fields(MEASURES[measure], all_products), timeout)
+    chart_view = prefix + "$ucViewPicker$lbChart"
+    target = f"{prefix}$ucValuePicker${MEASURE_BUTTONS[measure]}"
+    _post(url, _fields(prefix, chart_view, all_products), timeout)
+    return _post(url, _fields(prefix, target, all_products), timeout)
 
 
 def extract_settings(doc):
@@ -185,22 +211,42 @@ def main():
     ap.add_argument("--outdir", default="data")
     ap.add_argument("--fx-only", action="store_true",
                     help="only the 8 default FX products instead of all 36")
+    ap.add_argument("--view", choices=sorted(VIEWS), default=DEFAULT_VIEW,
+                    help="which page hosts the dashboard; match the "
+                         "viewitemid in the url you copied the qsid from "
+                         f"(default: {DEFAULT_VIEW})")
     a = ap.parse_args()
 
     qsid, insid = os.environ.get("QS_QSID"), os.environ.get("QS_INSID")
     if not qsid or not insid:
         sys.exit("set QS_QSID and QS_INSID (copy them from the dashboard URL)")
 
-    measures = sorted(MEASURES) if a.all_measures else [a.measure]
+    measures = list(MEASURES) if a.all_measures else [a.measure]
     os.makedirs(a.outdir, exist_ok=True)
 
+    seen = {}
     for measure in measures:
         cfg = extract_settings(
-            fetch(qsid, insid, measure, all_products=not a.fx_only))
+            fetch(qsid, insid, measure, all_products=not a.fx_only,
+                  view=a.view))
+        title = cfg.get("Title") or ""
+        # The measure click failing is silent: the server just re-renders the
+        # measure already selected, so every file ends up identical. The title
+        # is the only signal, so refuse to write a duplicate rather than
+        # quietly filling data/ with seven copies of one measure.
+        if title in seen:
+            sys.exit(
+                f"'{measure}' returned '{title}', already written for "
+                f"'{seen[title]}' - the measure was not applied.\n"
+                f"The control ids depend on which page hosts the dashboard; "
+                f"try --view {'standalone' if a.view == 'fedwatch' else 'fedwatch'} "
+                f"(match the viewitemid in the url you copied qsid from).")
+        seen[title] = measure
+
         out = a.out if (a.out and not a.all_measures) \
             else os.path.join(a.outdir, f"{measure}.csv")
         n = write_csv(cfg, out)
-        print(f"{cfg.get('Title'):<34} {len(cfg.get('Series', [])):>3} series  "
+        print(f"{title:<34} {len(cfg.get('Series', [])):>3} series  "
               f"{n:>7} points -> {out}", file=sys.stderr)
 
 

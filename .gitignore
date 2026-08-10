@@ -10,6 +10,12 @@ first-history.md
 # Superseded local copy of rates.py
 rates1.py
 
+# Saved page dumps used to inspect control ids
+cme.html
+
+# run_daily.py output
+logs/
+
 # Credentials
 .env
 

@@ -29,6 +29,12 @@ LOG_DIR = PROJECT_DIR / "logs"
 # CVOL inputs ever exist on this box.
 STEPS = [
     ("rates", [sys.executable, "rates.py"]),
+    # COT is published weekly (Friday, for the prior Tuesday), so most runs
+    # fetch nothing new. It is here anyway because writes are keyed on
+    # (report_date, symbol) and rewrite in place - a no-op run costs 12 small
+    # requests and cannot duplicate rows. Unlike rates.py, missing a day loses
+    # nothing: the CFTC api serves full history and --backfill can recover it.
+    ("cot", [sys.executable, "cot.py"]),
 ]
 
 
