@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """Daily brief — the narrative layer of the price-in platform.
 
-Reads the collected data (rates, cvol, cot, prices, calendar), evaluates the
-dashboard rules per traded pair, and prints a plain-language brief:
+Reads collected data (rates+vol via market_data.csv, plus cot/prices/calendar),
+evaluates the dashboard rules per traded pair, and prints a plain-language brief:
 per pair, three layers + CONTEXT / WATCH / VERDICT.
 
-This does NOT decide direction. It reports context: is today a signal day or
-noise, where is the asymmetry, what to watch. Direction stays with the chart.
+Does NOT decide direction. Reports context: signal day or noise, where the
+positioning asymmetry is, what to watch. Direction stays with the chart.
 
 Every sentence traces to a rule in dashboard-rules.md — transparency over magic.
-No free-form analysis; only the rules you wrote, rendered in words.
+No free-form analysis; only coded if/then rules rendered in words.
+
+Design notes from a month of practice:
+- Calendar: SHOW all upcoming events (full picture), but only currency-RELEVANT
+  events drive the VERDICT (an AUD event must not make EUR/USD a signal day).
+- COT: composition first (Rule 13) — leveraged vs commercial — then percentile
+  vs the symbol's own 3y/1y history (Rule 9: crowding = asymmetry, not direction).
+  Always flag the Tuesday-snapshot lag; warn if the report is stale (>7d).
+- Missing data is named, never fabricated (Rule 7).
+- Thresholds are named constants below, tunable as practice sharpens them.
 
 Usage:
-    python3 brief.py                    # today, all pairs
-    python3 brief.py --date 2026-08-05  # a specific day
+    python3 brief.py                     # latest date, all pairs
+    python3 brief.py --date 2026-08-10
     python3 brief.py --pair eurusd
 """
 import argparse
@@ -22,17 +31,31 @@ import datetime as dt
 import os
 from collections import defaultdict
 
+# ── tunable thresholds ─────────────────────────────────────────────────────
+EVENT_WINDOW_DAYS = 7
+PATH_SHIFT_BP = 5.0
+PATH_SLAP_BP = 8.0
+MEETING_MOVE_BP = 3.0
+LOCKED_ODDS = 90.0
+VOL_CRUSH = -0.15
+VOL_JUMP = 0.40
+PCTILE_LOW = 15
+PCTILE_HIGH = 85
+COT_3Y_WEEKS = 156
+COT_1Y_WEEKS = 52
+SKEW_HIST_MIN = 20
+SKEW_EXTREME_PCT = 10
+
 DATA = "data"
 
-# ── pair configuration ────────────────────────────────────────────────────
-# Each pair maps to the columns/symbols that describe it across the layers.
 PAIRS = {
     "eurusd": {
         "label": "EUR/USD",
-        "banks": ["ecb", "fed"],          # rates legs (primary first)
+        "banks": ["ecb", "fed"],
         "cvol": "EUVL", "skew": "euvl_skew",
-        "cot": "EUR",                      # COT symbol
+        "cot": "EUR",
         "price": "eurusd", "filters": ["dxy"],
+        "currencies": {"EUR", "USD"},
     },
     "usdcad": {
         "label": "USD/CAD",
@@ -40,37 +63,34 @@ PAIRS = {
         "cvol": "CAVL", "skew": "cavl_skew",
         "cot": "CAD",
         "price": "usdcad", "filters": ["dxy", "wti"],
+        "currencies": {"CAD", "USD"},
     },
 }
 
-# ── data loading ──────────────────────────────────────────────────────────
 
 def load_sheet(path):
-    """market_data.csv → {date: {col: value}}. Values kept as strings; caller floats."""
     rows = {}
     if not os.path.exists(path):
         return rows
-    with open(path) as f:
-        for r in csv.DictReader(f):
+    with open(path) as fh:
+        for r in csv.DictReader(fh):
             rows[r["date"]] = r
     return rows
 
 
 def load_calendar(path):
-    """calendar.csv → list of event dicts."""
     if not os.path.exists(path):
         return []
-    with open(path) as f:
-        return list(csv.DictReader(f))
+    with open(path) as fh:
+        return list(csv.DictReader(fh))
 
 
 def load_cot(path):
-    """cot.csv → {symbol: [rows sorted by date]} for percentile math."""
     by_symbol = defaultdict(list)
     if not os.path.exists(path):
         return by_symbol
-    with open(path) as f:
-        for r in csv.DictReader(f):
+    with open(path) as fh:
+        for r in csv.DictReader(fh):
             by_symbol[r["symbol"]].append(r)
     for sym in by_symbol:
         by_symbol[sym].sort(key=lambda x: x["report_date"])
@@ -78,20 +98,16 @@ def load_cot(path):
 
 
 def load_prices(path):
-    """prices.csv → {(date, series): row}."""
     px = {}
     if not os.path.exists(path):
         return px
-    with open(path) as f:
-        for r in csv.DictReader(f):
+    with open(path) as fh:
+        for r in csv.DictReader(fh):
             px[(r["date"], r["series"])] = r
     return px
 
 
-# ── helpers ───────────────────────────────────────────────────────────────
-
 def f(v):
-    """Parse a possibly-empty/None/signed string to float or None."""
     if v is None or v == "":
         return None
     try:
@@ -100,14 +116,21 @@ def f(v):
         return None
 
 
+def ordinal(n):
+    n = int(round(n))
+    if 10 <= n % 100 <= 20:
+        suf = "th"
+    else:
+        suf = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf}"
+
+
 def prev_date(sheet, date):
-    """The most recent sheet date strictly before `date`."""
     earlier = sorted(d for d in sheet if d < date)
     return earlier[-1] if earlier else None
 
 
 def pct_rank(values, current, window=None):
-    """Percentile of `current` within `values` (% strictly below). Low = more short."""
     v = [x for x in values if x is not None]
     if window:
         v = v[-window:]
@@ -117,23 +140,44 @@ def pct_rank(values, current, window=None):
 
 
 def cot_reading(cot_rows):
-    """Latest net_spec + its 3y/1y percentile (weekly ≈ 156/52 reports)."""
     if not cot_rows:
         return None
-    nets = [f(r["net_spec"]) for r in cot_rows]
-    cur = nets[-1]
-    if cur is None:
+    latest = cot_rows[-1]
+    net_spec = f(latest["net_spec"])
+    net_comm = f(latest.get("net_comm"))
+    if net_spec is None:
         return None
+    nets = [f(r["net_spec"]) for r in cot_rows]
+    composition = None
+    if net_comm is not None:
+        composition = "aligned" if (net_spec > 0) == (net_comm > 0) else "mirror"
     return {
-        "net": cur,
-        "date": cot_rows[-1]["report_date"],
-        "pctile_3y": pct_rank(nets, cur, 156),
-        "pctile_1y": pct_rank(nets, cur, 52),
+        "net_spec": net_spec, "net_comm": net_comm, "composition": composition,
+        "date": latest["report_date"],
+        "pctile_3y": pct_rank(nets, net_spec, COT_3Y_WEEKS),
+        "pctile_1y": pct_rank(nets, net_spec, COT_1Y_WEEKS),
     }
 
 
-def upcoming_events(calendar, date, days=7, min_impact="HIGH"):
-    """High-impact events within `days` after `date` (for the quiet-window rule)."""
+def skew_extreme(sheet, col, current, asof_date):
+    hist = []
+    for d in sorted(sheet):
+        if d > asof_date:
+            break
+        v = f(sheet[d].get(col))
+        if v is not None:
+            hist.append(v)
+    hist = hist[-252:]
+    if len(hist) < SKEW_HIST_MIN or current is None:
+        return (False, None, None)
+    s = sorted(hist)
+    lo = s[max(0, int(len(s) * SKEW_EXTREME_PCT / 100) - 1)]
+    hi = s[min(len(s) - 1, int(len(s) * (100 - SKEW_EXTREME_PCT) / 100))]
+    return (current <= lo or current >= hi, lo, hi)
+
+
+def upcoming_events(calendar, date, days=EVENT_WINDOW_DAYS, currencies=None,
+                    min_impact="HIGH"):
     d0 = dt.date.fromisoformat(date)
     order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
     thr = order.get(min_impact, 2)
@@ -143,30 +187,33 @@ def upcoming_events(calendar, date, days=7, min_impact="HIGH"):
             ed = dt.date.fromisoformat(e["date"])
         except (ValueError, KeyError):
             continue
-        if 0 <= (ed - d0).days <= days and order.get(e.get("impact", "LOW"), 0) >= thr:
-            out.append(e)
-    return sorted(out, key=lambda x: x["date"])
+        if not (0 <= (ed - d0).days <= days):
+            continue
+        if order.get(e.get("impact", "LOW"), 0) < thr:
+            continue
+        if currencies is not None and e.get("currency") not in currencies:
+            continue
+        out.append(e)
+    return sorted(out, key=lambda x: (x["date"], x.get("time", "")))
 
-
-# ── the rules → sentences (each maps to dashboard-rules.md) ────────────────
 
 def brief_for_pair(pair, cfg, date, sheet, calendar, cot, prices):
     today = sheet.get(date, {})
     pd = prev_date(sheet, date)
     yest = sheet.get(pd, {}) if pd else {}
-
     lines = {"rates": [], "vol": [], "pos": []}
-    watch, verdict_bits = [], []
+    watch, flags = [], []
 
-    # ---- Layer 1: rates ----
+    # Layer 1
     primary = cfg["banks"][0]
     odds = f(today.get(f"{primary}_odds") or today.get(f"{primary}_odds_pct"))
     bps = f(today.get(f"{primary}_bps"))
     path = f(today.get(f"{primary}_path_12m"))
     ppath = f(yest.get(f"{primary}_path_12m"))
-    evs = upcoming_events(calendar, date, 7, "HIGH")
-
-    if odds is not None:
+    pbps = f(yest.get(f"{primary}_bps"))
+    if odds is None:
+        lines["rates"].append(f"no {primary.upper()} rate data")
+    else:
         seg = f"{primary.upper()} next-mtg {odds:.0f}%"
         if bps is not None:
             seg += f" ({bps:+.1f}bp)"
@@ -175,131 +222,166 @@ def brief_for_pair(pair, cfg, date, sheet, calendar, cot, prices):
             if ppath is not None:
                 seg += f" ({path - ppath:+.1f} vs prev)"
         lines["rates"].append(seg)
-    # R3 locked-meeting (reverse)
-    if odds is not None and odds >= 90:
-        lines["rates"].append("meeting LOCKED (>90%) — surprise is the MISS, not the hit")
-    # R1 / R4 quiet vs tripwire
-    if evs:
-        nxt = evs[0]
-        lines["rates"].append(f"⚑ {nxt['currency']} {nxt['event']} on {nxt['date']} — window closing")
-        verdict_bits.append("event near")
-    else:
-        lines["rates"].append("no high-impact event in 7d → quiet window")
-        verdict_bits.append("quiet")
+        if odds >= LOCKED_ODDS:
+            lines["rates"].append("meeting LOCKED (>90%) — the surprise is the MISS, not the hit")
+        if path is not None and ppath is not None:
+            dp = path - ppath
+            if abs(dp) >= PATH_SLAP_BP:
+                lines["rates"].append(f"path {dp:+.1f}bp in a day — SLAP (real driver hit)")
+                flags.append("repricing")
+            elif abs(dp) >= PATH_SHIFT_BP:
+                lines["rates"].append(f"path {dp:+.1f}bp — notable shift")
+        if bps is not None and pbps is not None and abs(bps - pbps) >= MEETING_MOVE_BP:
+            lines["rates"].append(f"next-mtg {bps - pbps:+.1f}bp — meeting repricing")
 
-    # ---- Layer 2: vol ----
+    events_all = upcoming_events(calendar, date, currencies=None)
+    events_rel = upcoming_events(calendar, date, currencies=cfg["currencies"])
+    if events_rel:
+        nxt = events_rel[0]
+        lines["rates"].append(
+            f"⚑ {nxt['currency']} {nxt['event']} {nxt['date']} — relevant event near")
+        flags.append("event_near")
+    else:
+        lines["rates"].append(
+            f"no relevant ({'/'.join(sorted(cfg['currencies']))}) HIGH event in "
+            f"{EVENT_WINDOW_DAYS}d → quiet on the calendar")
+
+    # Layer 2
     cvol = f(today.get(cfg["cvol"]))
     cvol_p = f(yest.get(cfg["cvol"]))
     skew = f(today.get(cfg["skew"]))
     skew_p = f(yest.get(cfg["skew"]))
-    if cvol is not None:
+    if cvol is None:
+        lines["vol"].append(f"no {cfg['cvol']} data")
+    else:
         seg = f"{cfg['cvol']} {cvol:.2f}"
         if cvol_p is not None:
             d = cvol - cvol_p
             seg += f" ({d:+.2f})"
-            # R5 vol crush
-            if d <= -0.15 and not evs:
+            if d <= VOL_CRUSH and not events_rel:
                 lines["vol"].append("vol crushing — event premium draining, worry fading")
-            # R7 vol jump = alarm
-            if d >= 0.40:
-                lines["vol"].append("⚑ vol JUMPING — something is moving; check skew for direction")
-                verdict_bits.append("vol spike")
+            if d >= VOL_JUMP:
+                lines["vol"].append("⚑ vol JUMPING — something is moving; check skew for the side")
+                flags.append("vol_jump")
         lines["vol"].insert(0, seg)
     if skew is not None:
         side = "put" if skew < 0 else "call"
         seg = f"skew {skew:+.2f} ({side}-tilted)"
         if skew_p is not None:
-            drift = "toward zero (fear easing)" if abs(skew) < abs(skew_p) else "deeper (fear building)"
-            seg += f", {drift}"
+            seg += (", easing toward zero" if abs(skew) < abs(skew_p)
+                    else ", deepening (fear building)")
         lines["vol"].append(seg)
-        # R6 extreme skew (rough; real version uses 1y band)
-        if abs(skew) >= 0.65:
-            watch.append(f"{cfg['cvol']} skew extreme ({skew:+.2f}) — {side}-insurance rich; "
-                         f"reversal + vol-crush risk on that side")
+        ext, lo, hi = skew_extreme(sheet, cfg["skew"], skew, date)
+        if ext:
+            watch.append(f"{cfg['cvol']} skew {skew:+.2f} extreme vs its own 1y band "
+                         f"[{lo:+.2f},{hi:+.2f}] — {side}-insurance rich, reversal/vol-crush risk")
 
-    # ---- Layer 3: positioning ----
+    # Layer 3
     cot_read = cot_reading(cot.get(cfg["cot"], []))
-    if cot_read:
-        p3, p1 = cot_read["pctile_3y"], cot_read["pctile_1y"]
-        net = cot_read["net"]
-        direction = "short" if net < 0 else "long"
-        seg = f"Lev funds net {net:+,.0f} ({direction})"
-        if p3 is not None:
-            seg += f", {p3:.0f}th pctile 3y"
-        lines["pos"].append(seg)
-        # R8 / R9 crowding = asymmetry
-        if p3 is not None and (p3 <= 15 or p3 >= 85):
-            zone = "crowded " + direction
-            opp = "up" if direction == "short" else "down"
-            lines["pos"].append(f"→ {zone} (extreme). Asymmetry: news AGAINST the boat = squeeze {opp}")
-            watch.append(f"{cfg['label']} positioning extreme — a move against the crowd squeezes hard {opp}")
-            verdict_bits.append("crowded")
-        # note on staleness (COT is a Tuesday snapshot)
-        lines["pos"].append(f"(COT as of {cot_read['date']} — 3d lag)")
-
-    # ---- context sentence + verdict ----
-    if "event near" in verdict_bits:
-        context = "Event window OPEN — a catalyst is near. Signal day: stay alert."
-        verdict = "SIGNAL DAY — event near; watch the reaction, don't pre-position blindly."
-    elif "vol spike" in verdict_bits:
-        context = "Vol is moving without a scheduled event — something off-calendar. Investigate."
-        verdict = "INVESTIGATE — vol jump, no event. Find the driver before acting."
+    if not cot_read:
+        lines["pos"].append(f"no COT data for {cfg['cot']}")
     else:
-        context = "Quiet window, no near catalyst."
-        if "crowded" in verdict_bits:
-            context += " Positioning is crowded — the setup is asymmetric."
-            verdict = "NOISE DAY — no catalyst. But crowd is extreme: don't ADD to the crowded side."
-        else:
-            verdict = "NOISE DAY — no catalyst, no extreme. Default: no trade."
+        ns = cot_read["net_spec"]
+        direction = "short" if ns < 0 else "long"
+        seg = f"Lev funds net {ns:+,.0f} ({direction})"
+        p3 = cot_read["pctile_3y"]
+        if p3 is not None:
+            seg += f", {ordinal(p3)} pctile 3y"
+        lines["pos"].append(seg)
+        comp = cot_read["composition"]
+        if comp == "aligned":
+            lines["pos"].append("fast & slow money SAME side → genuine directional consensus")
+        elif comp == "mirror":
+            lines["pos"].append("fast vs slow OPPOSITE → check structural/basis "
+                                "(in FX usually a real fast-vs-slow disagreement)")
+        if p3 is not None and (p3 <= PCTILE_LOW or p3 >= PCTILE_HIGH):
+            opp = "up" if direction == "short" else "down"
+            lines["pos"].append(f"→ crowded {direction} (extreme). "
+                                f"Asymmetry: news AGAINST the boat = squeeze {opp}")
+            watch.append(f"{cfg['label']} positioning extreme ({ordinal(p3)} pctile) — "
+                         f"a move against the crowd squeezes hard {opp}")
+            flags.append("crowded")
+        try:
+            lag = (dt.date.fromisoformat(date) - dt.date.fromisoformat(cot_read["date"])).days
+        except ValueError:
+            lag = None
+        note = f"(COT as of {cot_read['date']}"
+        if lag is not None:
+            # COT is weekly, so a few days' age is normal; only warn if a
+            # weekly release looks actually missed (>10 days).
+            note += f" — {lag}d old" + ("; STALE, re-run collector" if lag > 10 else "")
+        note += ")"
+        lines["pos"].append(note)
 
-    return {"cfg": cfg, "lines": lines, "watch": watch,
-            "context": context, "verdict": verdict}
+    divergence = ("vol_jump" in flags and "event_near" not in flags
+                  and "repricing" not in flags)
+    if divergence:
+        context = "Vol moving with no relevant scheduled event — off-calendar force. Investigate."
+        verdict = "INVESTIGATE — vol jump without a relevant event. Find the driver first."
+    elif "event_near" in flags:
+        context = "Relevant event window OPEN — a catalyst is near."
+        verdict = "SIGNAL DAY — relevant event near; watch the reaction, don't pre-position blindly."
+    elif "repricing" in flags:
+        context = "Rates repricing hard with no meeting — a driver is live."
+        verdict = "SIGNAL DAY — path moving; identify the driver, watch for follow-through."
+    elif "crowded" in flags:
+        context = "Quiet on relevant calendar, but positioning is crowded — asymmetric setup."
+        verdict = ("NOISE DAY on the calendar — but crowd is extreme: "
+                   "don't ADD to the crowded side; watch for a squeeze against it.")
+    else:
+        context = "Quiet window — no relevant catalyst, no positioning extreme."
+        verdict = "NOISE DAY — default: no trade. Preserve capital."
 
+    return {"cfg": cfg, "lines": lines, "events_all": events_all,
+            "watch": watch, "context": context, "verdict": verdict}
 
-# ── render ────────────────────────────────────────────────────────────────
 
 def render(date, briefs):
-    print("=" * 60)
+    print("=" * 64)
     print(f"  DAILY BRIEF — {date}")
-    print("=" * 60)
+    print("=" * 64)
     for b in briefs:
         cfg = b["cfg"]
         print(f"\n▌ {cfg['label']}")
-        for layer, tag in [("rates", "rates"), ("vol", "vol "), ("pos", "pos ")]:
+        for layer, tag in [("rates", "rates"), ("vol", "vol  "), ("pos", "pos  ")]:
             for i, ln in enumerate(b["lines"][layer]):
                 head = f"  {tag}:" if i == 0 else "        "
                 print(f"{head} {ln}")
+        if b["events_all"]:
+            rel = cfg["currencies"]
+            print("  cal  : upcoming (7d):")
+            for e in b["events_all"][:6]:
+                mark = "•" if e.get("currency") in rel else " "
+                print(f"        {mark} {e['date']} {e.get('time','')} "
+                      f"{e.get('currency','')} {e.get('event','')}")
         print(f"  ▶ CONTEXT: {b['context']}")
-        if b["watch"]:
-            for w in b["watch"]:
-                print(f"  ▶ WATCH:   {w}")
+        for w in b["watch"]:
+            print(f"  ▶ WATCH:   {w}")
         print(f"  ▶ VERDICT: {b['verdict']}")
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 64)
     print("  Direction is yours (the chart). This is the ground you stand on.")
-    print("=" * 60)
+    print("  • = event relevant to that pair (drives the verdict).")
+    print("=" * 64)
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--date", default=None, help="YYYY-MM-DD (default: latest in sheet)")
-    ap.add_argument("--pair", default=None, help="single pair (e.g. eurusd)")
-    ap.add_argument("--datadir", default=DATA, help="dir with cot/prices/calendar csvs")
-    ap.add_argument("--sheet", default="market_data.csv",
-                    help="path to market_data.csv (default: project root)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--date", default=None)
+    ap.add_argument("--pair", default=None)
+    ap.add_argument("--datadir", default=DATA)
+    ap.add_argument("--sheet", default="market_data.csv")
     a = ap.parse_args()
 
     sheet = load_sheet(a.sheet)
     calendar = load_calendar(os.path.join(a.datadir, "calendar.csv"))
     cot = load_cot(os.path.join(a.datadir, "cot.csv"))
     prices = load_prices(os.path.join(a.datadir, "prices.csv"))
-
     if not sheet:
-        raise SystemExit("no market_data.csv — run build_sheet.py first")
+        raise SystemExit(f"no sheet at {a.sheet} — run build_sheet.py first")
 
     date = a.date or max(sheet)
     pairs = {a.pair: PAIRS[a.pair]} if a.pair else PAIRS
-
     briefs = [brief_for_pair(p, cfg, date, sheet, calendar, cot, prices)
               for p, cfg in pairs.items()]
     render(date, briefs)
