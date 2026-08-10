@@ -130,19 +130,15 @@ Note the deploy uses `reset --hard`: the VPS is a deploy target, not somewhere
 to edit code — local changes there are discarded. `data/` is gitignored, so the
 accumulated archive is never touched.
 
-## What data is tracked
+## Data on the VPS
 
-| Path | Tracked | Why |
-|---|---|---|
-| `data/raw/` | yes | Irreplaceable — rateprobability exposes only 5 dates, so a missed day is a permanent gap. Committing it is the backup. |
-| `data/cot.csv` | yes | Small, and public CFTC data. Also re-fetchable via `--backfill`. |
-| `data/*.csv` (cvol, skew, …) | no | ~22MB of CME licensed data, rewritten in full on every fetch. Re-fetchable from QuikStrike. |
-| `market_data.csv`, `logs/` | no | Derived output and runtime noise. |
+`data/` and `market_data.csv` are **not tracked in git** — the fetched data
+lives on the VPS only, and each machine keeps its own.
 
-Because `data/raw/` is tracked, the VPS deploy (`git reset --hard`) will
-overwrite it with whatever is on origin. The VPS is the machine that runs the
-daily fetch, so **commit and push from the VPS**, or its snapshots are lost on
-the next deploy.
+This matters most for `data/raw/`. Those rateprobability snapshots are
+irreplaceable: the API exposes only today plus 1w/3w/6w/10w ago, so a day
+without a run is a permanent gap that cannot be backfilled. Nothing in this
+repo backs that directory up — arrange that on the VPS.
 
 Deploying does not run anything. Scheduling the daily fetch on the VPS is a
 separate step, still to be set up.
