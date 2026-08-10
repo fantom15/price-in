@@ -14,9 +14,12 @@ Two things to know about this endpoint:
   * Credentials expire with the browser session. Re-copy them from the
     dashboard URL when the script reports the component was not found.
 
-Environment:
+Environment (both OPTIONAL):
     QS_QSID    session id from the dashboard URL (?qsid=...)
     QS_INSID   instrument id from the dashboard URL (?insid=...)
+
+If they are unset, qs_session.provision() mints a fresh pair automatically, so
+this runs unattended. Set them only to reuse a session you already have open.
 
 The control ids depend on WHICH PAGE hosts the dashboard. CME moved CVOL inside
 the FedWatch page, so ids that used to start with
@@ -219,7 +222,18 @@ def main():
 
     qsid, insid = os.environ.get("QS_QSID"), os.environ.get("QS_INSID")
     if not qsid or not insid:
-        sys.exit("set QS_QSID and QS_INSID (copy them from the dashboard URL)")
+        # No credentials supplied: mint our own. qs_session walks a fresh
+        # session to the CVOL chart, which is what makes the ids usable here -
+        # ids from a session that never opened CVOL return a FedWatch page.
+        try:
+            from qs_session import provision
+        except ImportError:
+            sys.exit("set QS_QSID and QS_INSID, or keep qs_session.py next to "
+                     "this script so they can be provisioned automatically")
+        print("no QS_QSID/QS_INSID set - provisioning a session...",
+              file=sys.stderr)
+        insid, qsid = provision(verbose=True)
+        print(f"  using insid={insid} qsid={qsid}", file=sys.stderr)
 
     measures = list(MEASURES) if a.all_measures else [a.measure]
     os.makedirs(a.outdir, exist_ok=True)

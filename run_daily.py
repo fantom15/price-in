@@ -35,6 +35,19 @@ STEPS = [
     # requests and cannot duplicate rows. Unlike rates.py, missing a day loses
     # nothing: the CFTC api serves full history and --backfill can recover it.
     ("cot", [sys.executable, "cot.py"]),
+    ("prices", [sys.executable, "prices.py"]),
+    # Refetches the current week every run: actuals appear as releases land,
+    # so today's page is never final. Needs camoufox on this box - forexfactory
+    # 403s plain http. If it is missing the step fails loudly rather than
+    # silently skipping, which is the point of the telegram alert.
+    ("calendar", [sys.executable, "ff_calendar.py"]),
+    # No credentials needed: quikstrike falls back to qs_session.provision(),
+    # which mints and warms its own session. Set QS_QSID/QS_INSID only to reuse
+    # a browser session you already have open.
+    ("quikstrike", [sys.executable, "quikstrike.py", "--all-measures",
+                    "--outdir", "data"]),
+    ("sheet", [sys.executable, "build_sheet.py", "--days", "30",
+               "--out", "market_data.csv"]),
 ]
 
 

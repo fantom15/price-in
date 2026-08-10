@@ -17,8 +17,10 @@ Central bank columns come from data/rates.csv (rateprobability.com):
 
 Those are only populated on dates rateprobability has a snapshot for. The api
 exposes today plus 1w/3w/6w/10w ago, so early rows are sparse - run rates.py
-daily and the coverage fills in going forward. Remaining columns (dxy, usdcad,
-eurusd, wti) are still emitted empty so the sheet keeps its shape.
+daily and the coverage fills in going forward.
+
+Price columns (dxy, usdcad, eurusd, wti) are daily closes from data/prices.csv,
+matched on the series name.
 
 Usage:
     python3 build_sheet.py --days 30
@@ -42,8 +44,9 @@ CB_COLS = [
     ("boc", ["odds", "bps"]),
 ]
 
-# Columns this script cannot fill yet, kept so the sheet matches the template.
-EXTERNAL_COLS = ["dxy", "usdcad", "eurusd", "wti"]
+# Price columns, from data/prices.csv (series name == column name). These are
+# daily closes; the series are fetched by prices.py.
+PRICE_COLS = ["dxy", "usdcad", "eurusd", "wti"]
 
 # How far out "12 month path" looks, and how far a meeting may sit from that
 # mark before it is rejected. Meetings are ~6-8 weeks apart, so a 60-day window
@@ -73,6 +76,20 @@ def load(path):
             try:
                 out[root(r["ticker"])][r["date"]] = float(r["value"])
             except (ValueError, KeyError):
+                continue
+    return out
+
+
+def load_prices(path):
+    """series -> {date: close}, from the long-format prices.csv."""
+    out = defaultdict(dict)
+    if not os.path.exists(path):
+        return out
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            try:
+                out[r["series"]][r["date"]] = float(r["close"])
+            except (ValueError, KeyError, TypeError):
                 continue
     return out
 
@@ -136,6 +153,7 @@ def main():
     levels = load(os.path.join(a.datadir, "cvol.csv"))
     skews = load(os.path.join(a.datadir, "skew.csv"))
     rates = load_rates(os.path.join(a.datadir, "rates.csv"))
+    prices = load_prices(os.path.join(a.datadir, "prices.csv"))
     if not levels:
         sys.exit(f"no data in {a.datadir}/cvol.csv - run quikstrike.py first")
 
@@ -152,7 +170,7 @@ def main():
         header += [t, f"{t}_chg", f"{t.lower()}_skew"]
     for bank, cols in CB_COLS:
         header += [f"{bank}_{c}" for c in cols]
-    header += EXTERNAL_COLS
+    header += PRICE_COLS
 
     with open(a.out, "w", newline="") as f:
         w = csv.writer(f)
@@ -178,7 +196,12 @@ def main():
                     # odds are a percentage, bps are basis points and signed
                     row.append("" if v is None else
                                (f"{v:.2f}" if c.startswith("odds") else f"{v:+.1f}"))
-            row += [""] * len(EXTERNAL_COLS)
+            for c in PRICE_COLS:
+                v = prices.get(c, {}).get(d)
+                # FX needs 4dp to be readable; dxy/wti only 2.
+                row.append("" if v is None else
+                           f"{v:.4f}" if c in ("eurusd", "usdcad")
+                           else f"{v:.2f}")
             w.writerow(row)
 
     print(f"{len(dates)} rows -> {a.out}", file=sys.stderr)
