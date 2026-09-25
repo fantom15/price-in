@@ -45,6 +45,7 @@ COT_3Y_WEEKS = 156
 COT_1Y_WEEKS = 52
 SKEW_HIST_MIN = 20
 SKEW_EXTREME_PCT = 10
+RATE_MAX_AGE_BDAYS = 3   # oldest rate reading the brief will show (dated, aged)
 
 DATA = "data"
 
@@ -176,6 +177,76 @@ def skew_extreme(sheet, col, current, asof_date):
     return (current <= lo or current >= hi, lo, hi)
 
 
+def load_decisions(path=None):
+    """bank -> sorted decision dates, from data/cb_meetings.csv (rates.py)."""
+    path = path or os.path.join(DATA, "cb_meetings.csv")
+    out = defaultdict(list)
+    if os.path.exists(path):
+        with open(path) as fh:
+            for r in csv.DictReader(fh):
+                out[r["bank"]].append(r["decision_date"])
+    for b in out:
+        out[b].sort()
+    return out
+
+
+def bdays_between(a, b):
+    """Business days after `a` up to and including `b` (0 if same day)."""
+    d0, d1 = dt.date.fromisoformat(a), dt.date.fromisoformat(b)
+    return sum(1 for i in range(1, (d1 - d0).days + 1)
+               if (d0 + dt.timedelta(days=i)).weekday() < 5)
+
+
+def _rate_vals(row, bank):
+    return (f(row.get(f"{bank}_odds") or row.get(f"{bank}_odds_pct")),
+            f(row.get(f"{bank}_bps")), f(row.get(f"{bank}_path_12m")))
+
+
+def rate_reading(sheet, date, bank, decisions=None):
+    """The bank's latest rate reading on or before `date`, dated and aged.
+
+    Layer 1 sources publish with a lag (BoC settlement, FedWatch history and
+    the BoE curve end 1-2 days before the report date), so today's sheet row is
+    often empty for them. A reading up to RATE_MAX_AGE_BDAYS business days old
+    is shown - always with its date and age next to the number, never silently.
+    It is WITHHELD (shown as missing, with a loud note) when that bank took a
+    decision after the reading: a pre-decision reading on or after decision day
+    is exactly what produced the -45.7bp ECB "cut".
+
+    -> {as_of, age, odds, bps, path, prev_bps, prev_path, note}; the values are
+       None when there is no usable reading, and `note` says why."""
+    dates = [d for d in sorted(sheet) if d <= date and any(
+        v is not None for v in _rate_vals(sheet[d], bank))]
+    out = {"as_of": None, "age": None, "odds": None, "bps": None, "path": None,
+           "prev_bps": None, "prev_path": None, "note": None}
+    if not dates:
+        return out
+    as_of = dates[-1]
+    age = bdays_between(as_of, date)
+    if age > RATE_MAX_AGE_BDAYS:
+        out["note"] = (f"latest {bank.upper()} reading is {as_of}, {age} business "
+                       f"days old - too stale to show")
+        return out
+    decs = (decisions if decisions is not None else load_decisions()).get(bank, [])
+    after = [d for d in decs if as_of < d <= date]
+    if after:
+        out["note"] = (f"{bank.upper()} decided on {after[0]}, after its last reading "
+                       f"({as_of}) - reading withheld, it predates the decision")
+        return out
+    odds, bps, path = _rate_vals(sheet[as_of], bank)
+    prev = _rate_vals(sheet[dates[-2]], bank) if len(dates) > 1 else (None, None, None)
+    out.update(as_of=as_of, age=age, odds=odds, bps=bps, path=path,
+               prev_bps=prev[1], prev_path=prev[2])
+    return out
+
+
+def age_tag(rd):
+    """' — as of 24 Sep, 1d old' for a lagged reading; '' for today's."""
+    if not rd["as_of"] or rd["age"] == 0:
+        return ""
+    return f" — as of {dt.date.fromisoformat(rd['as_of']):%d %b}, {rd['age']}d old"
+
+
 def upcoming_events(calendar, date, days=EVENT_WINDOW_DAYS, currencies=None,
                     min_impact="HIGH"):
     d0 = dt.date.fromisoformat(date)
@@ -197,32 +268,39 @@ def upcoming_events(calendar, date, days=EVENT_WINDOW_DAYS, currencies=None,
     return sorted(out, key=lambda x: (x["date"], x.get("time", "")))
 
 
-def brief_for_pair(pair, cfg, date, sheet, calendar, cot, prices):
+def brief_for_pair(pair, cfg, date, sheet, calendar, cot, prices, decisions=None):
     today = sheet.get(date, {})
     pd = prev_date(sheet, date)
     yest = sheet.get(pd, {}) if pd else {}
     lines = {"rates": [], "vol": [], "pos": []}
     watch, flags = [], []
 
-    # Layer 1
+    # Layer 1 - latest dated reading (sources lag the report date by 1-2 days)
     primary = cfg["banks"][0]
-    odds = f(today.get(f"{primary}_odds") or today.get(f"{primary}_odds_pct"))
-    bps = f(today.get(f"{primary}_bps"))
-    path = f(today.get(f"{primary}_path_12m"))
-    ppath = f(yest.get(f"{primary}_path_12m"))
-    pbps = f(yest.get(f"{primary}_bps"))
-    if odds is None:
-        lines["rates"].append(f"no {primary.upper()} rate data")
+    rd = rate_reading(sheet, date, primary, decisions)
+    odds, bps, path = rd["odds"], rd["bps"], rd["path"]
+    ppath, pbps = rd["prev_path"], rd["prev_bps"]
+    if rd["note"] and "withheld" in rd["note"]:
+        lines["rates"].append(f"⚑ {rd['note']}")
+    elif odds is None and bps is None and path is None:
+        lines["rates"].append(f"no {primary.upper()} rate data"
+                              + (f" ({rd['note']})" if rd["note"] else ""))
     else:
-        seg = f"{primary.upper()} next-mtg {odds:.0f}%"
-        if bps is not None:
-            seg += f" ({bps:+.1f}bp)"
+        if odds is not None:
+            seg = f"{primary.upper()} next-mtg {odds:.0f}%"
+            if bps is not None:
+                seg += f" ({bps:+.1f}bp)"
+        elif bps is not None:
+            # First priced horizon spans more than one decision: no probability.
+            seg = f"{primary.upper()} front {bps:+.1f}bp (multi-meeting, no single-mtg odds)"
+        else:
+            seg = f"{primary.upper()} next-mtg odds n/a"
         if path is not None:
             seg += f", 12m path {path:+.1f}"
             if ppath is not None:
                 seg += f" ({path - ppath:+.1f} vs prev)"
-        lines["rates"].append(seg)
-        if odds >= LOCKED_ODDS:
+        lines["rates"].append(seg + age_tag(rd))
+        if odds is not None and odds >= LOCKED_ODDS:
             lines["rates"].append("meeting LOCKED (>90%) — the surprise is the MISS, not the hit")
         if path is not None and ppath is not None:
             dp = path - ppath
@@ -232,7 +310,8 @@ def brief_for_pair(pair, cfg, date, sheet, calendar, cot, prices):
             elif abs(dp) >= PATH_SHIFT_BP:
                 lines["rates"].append(f"path {dp:+.1f}bp — notable shift")
         if bps is not None and pbps is not None and abs(bps - pbps) >= MEETING_MOVE_BP:
-            lines["rates"].append(f"next-mtg {bps - pbps:+.1f}bp — meeting repricing")
+            what = "next-mtg" if odds is not None else "front horizon"
+            lines["rates"].append(f"{what} {bps - pbps:+.1f}bp — meeting repricing")
 
     events_all = upcoming_events(calendar, date, currencies=None)
     events_rel = upcoming_events(calendar, date, currencies=cfg["currencies"])
@@ -382,7 +461,8 @@ def main():
 
     date = a.date or max(sheet)
     pairs = {a.pair: PAIRS[a.pair]} if a.pair else PAIRS
-    briefs = [brief_for_pair(p, cfg, date, sheet, calendar, cot, prices)
+    decisions = load_decisions(os.path.join(a.datadir, "cb_meetings.csv"))
+    briefs = [brief_for_pair(p, cfg, date, sheet, calendar, cot, prices, decisions)
               for p, cfg in pairs.items()]
     render(date, briefs)
 

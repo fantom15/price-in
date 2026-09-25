@@ -23,7 +23,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-import brief as brief_mod
+import brief_explain as brief_mod
 
 SHEET = "market_data.csv"
 DATA = "data"
@@ -391,7 +391,7 @@ def main():
     st.title("price-in")
     st.caption(f"as of {upto} · lookback {lb} · direction stays with the chart")
 
-    # ── brief text (reuses brief.py's rules; nothing recomputed here) ──
+    # ── brief text (reuses brief_explain.py's rules; nothing recomputed here) ──
     date_str = str(upto)
     b_sheet = brief_mod.load_sheet(SHEET)
     b_cal = brief_mod.load_calendar(os.path.join(DATA, "calendar.csv"))
@@ -403,21 +403,10 @@ def main():
     else:
         cols = st.columns(len(pairs))
         for col, (name, cfg) in zip(cols, pairs.items()):
-            b = brief_mod.brief_for_pair(name, cfg, date_str, b_sheet,
-                                         b_cal, b_cot, b_px)
+            text = brief_mod.explain_pair(name, cfg, date_str, b_sheet,
+                                          b_cal, b_cot, b_px)
             with col:
-                st.subheader(cfg["label"])
-                for layer, tag in [("rates", "rates"), ("vol", "vol"),
-                                   ("pos", "pos")]:
-                    for i, ln in enumerate(b["lines"][layer]):
-                        st.markdown(
-                            f"<div style='font-size:0.82rem;line-height:1.45'>"
-                            f"<b>{tag if i == 0 else '&nbsp;' * len(tag)}</b> "
-                            f"{ln}</div>", unsafe_allow_html=True)
-                st.markdown(f"**CONTEXT** {b['context']}")
-                for w in b["watch"]:
-                    st.markdown(f"**WATCH** {w}")
-                st.markdown(f"**VERDICT** {b['verdict']}")
+                st.text(text)
 
     st.divider()
 

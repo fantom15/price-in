@@ -4,13 +4,22 @@
 Unlike the QuikStrike dashboard, this is a plain public JSON API - one endpoint
 per central bank, no auth, no session state:
 
+<<<<<<< Updated upstream
     https://rateprobability.com/api/<bank>/latest
+=======
+    bank  current rate                 expectations
+    boc   BoC Valet CORRA              Montréal Exchange COA/CRA settlements
+    boe   BoE database SONIA           BoE OIS forward curve (xlsx in a zip)
+    ecb   ECB api deposit rate (DFR)   ICE Three-Month Euribor futures
+    fed   NY Fed EFFR target band      CME FedWatch buckets  - MANUAL input
+>>>>>>> Stashed changes
 
 The important limitation is that it is a SNAPSHOT api, not a time series. Each
 response carries today plus exactly four backdated snapshots (1w/3w/6w/10w ago);
 there is no way to request an arbitrary date - `?date=`/`?as_of=` are ignored
 and other paths fall through to the SPA shell.
 
+<<<<<<< Updated upstream
 So history is ACCUMULATED, not fetched. Every run archives the raw JSON under
 `<outdir>/raw/<bank>/<as_of>.json` and rebuilds the CSV from every snapshot
 ever collected. Run it daily and the history fills in going forward; the ago_*
@@ -18,6 +27,14 @@ buckets seed roughly 10 weeks of sparse back-history on the first run. The raw
 archive is the source of truth - it keeps every field the api returns, not just
 the ones the CSV projects, so new sheet columns can be backfilled later from
 snapshots already on disk without re-fetching.
+=======
+The "current" rate for a snapshot is the latest fixing dated strictly before
+it - what was actually known that day. CME data is never fetched: its terms
+prohibit scripted access. Fed expectations come from the FedWatch file you drop
+in data/manual/fed/ (format in banks/fed.py). Rows whose period has fully
+elapsed (period_end < as_of) are dropped; data/cb_meetings.csv lists every known
+decision date, which the report uses to withhold a pre-decision reading.
+>>>>>>> Stashed changes
 
 Each CSV row is one (bank, as_of, meeting) triple:
 
@@ -42,7 +59,11 @@ Usage:
 import argparse
 import csv
 import datetime as dt
+<<<<<<< Updated upstream
 import json
+=======
+import inspect
+>>>>>>> Stashed changes
 import os
 import sys
 import urllib.error
@@ -164,6 +185,33 @@ def load_archive(bank, rawdir):
             print(f"  skipping {bank}/{name}: {e}", file=sys.stderr)
 
 
+def drop_expired(rows):
+    """Drop a row only once its period has fully elapsed (period_end < as_of).
+    An in-progress contract - e.g. a 3-month period that started last week - is
+    live and carries the nearest expectations, so it stays. Sources give the
+    end in a private `_period_end` key (default: the meeting date itself)."""
+    out = []
+    for r in rows:
+        end = r.pop("_period_end", r["meeting"])
+        if end >= r["as_of"]:
+            out.append(r)
+    return out
+
+
+def decision_dates(bank, old, new):
+    """Central-bank decision dates for data/cb_meetings.csv, which the report
+    uses to refuse a reading taken before a decision it doesn't reflect.
+    Legacy rows and Fed rows are keyed on real meetings; the ECB module knows
+    its Governing Council calendar; futures/forward rows are not decisions."""
+    days = {m for _, m in old}
+    if getattr(SOURCES.get(bank), "REAL_MEETING_DATES", False):
+        days |= {r["meeting"] for r in new}
+    mod = SOURCES.get(bank)
+    if hasattr(mod, "decision_calendar"):
+        days |= set(mod.decision_calendar)
+    return [(bank, d) for d in days]
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -200,11 +248,54 @@ def main():
                 failed.append(bank)
                 print(f"{bank:<5} FETCH FAILED: {e}", file=sys.stderr)
 
+<<<<<<< Updated upstream
         for doc in load_archive(bank, rawdir):
             for r in to_rows(bank, doc):
                 key = (r["bank"], r["as_of"], r["meeting"])
                 if key not in merged or r["horizon"] == "today":
                     merged[key] = r
+=======
+    merged = {}   # (bank, as_of, meeting) -> row
+    decisions = []   # (bank, decision date) -> data/cb_meetings.csv
+    for bank in sorted(set(BANKS) | set(legacy.BANKS)):
+        old = legacy.build(ctx.rawdir, bank, lambda m, b=bank: ctx.note(b, m))
+        old = {k: r for k, r in old.items() if r["meeting"] >= r["as_of"]}
+        new = []
+        if bank in SOURCES:
+            print(f"{bank}:", file=sys.stderr)
+            mod = SOURCES[bank]
+            try:
+                if "legacy_meetings" in inspect.signature(mod.build).parameters:
+                    new = mod.build(ctx, legacy_meetings={m for _, m in old})
+                else:
+                    new = mod.build(ctx)
+            except Exception as e:  # noqa: BLE001
+                ctx.problem(bank, f"BUILD FAILED: {e!r}")
+        new = drop_expired(new)
+        covered = {r["as_of"] for r in new}
+        # Manual banks police their own input (check_fresh); for automated
+        # ones, a fetch can "succeed" while the source has stopped updating.
+        if bank in SOURCES and not getattr(SOURCES[bank], "MANUAL", False):
+            newest = max(covered, default=None)
+            if newest is None or newest < (a.today - dt.timedelta(
+                    days=STALE_DAYS)).isoformat():
+                ctx.problem(bank, f"SOURCE STALE - newest observation is {newest}, "
+                                  f"over {STALE_DAYS} days old")
+        per_meeting = getattr(SOURCES.get(bank), "REAL_MEETING_DATES", False)
+        blank_multi_meeting_odds(new, calendar={r["meeting"] for r in new} | {
+            m for _, m in old} if per_meeting else None)
+        # Sources keyed on real meeting dates (Fed) merge with legacy per
+        # meeting: a FedWatch download omits meetings already past on the day
+        # it was taken, so legacy may hold the only row for them. Sources
+        # keyed on contract/forward periods never share keys with legacy, so
+        # a date they cover drops legacy entirely rather than mixing the two.
+        for (as_of, meeting), r in old.items():
+            if per_meeting or as_of not in covered:
+                merged[(bank, as_of, meeting)] = r
+        for r in new:
+            merged[(bank, r["as_of"], r["meeting"])] = r
+        decisions += decision_dates(bank, old, new)
+>>>>>>> Stashed changes
 
         dates = sorted({k[1] for k in merged if k[0] == bank})
         n = sum(1 for k in merged if k[0] == bank)
@@ -217,6 +308,16 @@ def main():
         w.writeheader()
         for key in sorted(merged):
             w.writerow(merged[key])
+<<<<<<< Updated upstream
+=======
+    print(f"\n{len(merged)} rows -> {out}", file=sys.stderr)
+    cal = os.path.join(a.outdir, "cb_meetings.csv")
+    with open(cal, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["bank", "decision_date"])
+        w.writerows(sorted(set(decisions)))
+    print(f"{len(set(decisions))} decision dates -> {cal}", file=sys.stderr)
+>>>>>>> Stashed changes
 
     print(f"\n{len(merged)} rows -> {out}", file=sys.stderr)
     if paywalled:

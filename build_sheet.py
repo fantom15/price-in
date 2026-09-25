@@ -36,13 +36,14 @@ from collections import defaultdict
 # Tickers that get level + change + skew columns, in template order.
 VOL_TICKERS = ["CAVL", "EUVL", "S1VL"]
 
-# Central banks -> which of the three columns the template wants. The sheet has
-# a 12m path for fed/ecb but not boc, so the set is per-bank.
+# Central banks -> which columns the template wants. boc_path_12m was added
+# after the fact, so it is the last column (existing column positions unchanged).
 CB_COLS = [
     ("fed", ["odds_pct", "bps", "path_12m"]),
     ("ecb", ["odds", "bps", "path_12m"]),
     ("boc", ["odds", "bps"]),
 ]
+EXTRA_COLS = [("boc", "path_12m")]
 
 # Price columns, from data/prices.csv (series name == column name). These are
 # daily closes; the series are fetched by prices.py.
@@ -127,6 +128,13 @@ def load_rates(path):
             if not upcoming:
                 continue
             _, prob, bps = upcoming[0]
+<<<<<<< Updated upstream
+=======
+            # bps = the first priced horizon. prob is set only when that horizon
+            # is a single meeting (rates.py); otherwise it stays empty and the
+            # bps span more than one decision - e.g. a 3-month Euribor window,
+            # or FedWatch history that omits a meeting already past.
+>>>>>>> Stashed changes
 
             target = ref + dt.timedelta(days=PATH_HORIZON_DAYS)
             when, _, path_bps = min(upcoming, key=lambda m: abs(m[0] - target))
@@ -171,6 +179,7 @@ def main():
     for bank, cols in CB_COLS:
         header += [f"{bank}_{c}" for c in cols]
     header += PRICE_COLS
+    header += [f"{bank}_{c}" for bank, c in EXTRA_COLS]
 
     with open(a.out, "w", newline="") as f:
         w = csv.writer(f)
@@ -202,6 +211,9 @@ def main():
                 row.append("" if v is None else
                            f"{v:.4f}" if c in ("eurusd", "usdcad")
                            else f"{v:.2f}")
+            for bank, c in EXTRA_COLS:
+                v = (rates.get(bank, {}).get(d) or {}).get(c)
+                row.append("" if v is None else f"{v:+.1f}")
             w.writerow(row)
 
     print(f"{len(dates)} rows -> {a.out}", file=sys.stderr)
