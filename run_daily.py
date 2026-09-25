@@ -9,9 +9,22 @@ Config comes from a .env file in the project dir (gitignored):
     TG_TOKEN=...
     TG_CHAT=...
 
+<<<<<<< Updated upstream
 Scope: this runs rates.py only. build_sheet.py needs the CVOL csvs that live on
 the Mac (QuikStrike is manual), so the sheet is assembled there, not here. The
 VPS has one job: never miss a rate snapshot.
+=======
+Scope: this runs rates.py plus cot/prices/calendar/quikstrike/sheet.
+build_sheet.py needs the CVOL csvs that live on the Mac (QuikStrike is manual),
+so the sheet is assembled there, not here. The VPS has one job: never miss a
+rate snapshot.
+
+rates.py: official central-bank/exchange sources (see rates-sources.md), plain
+stdlib HTTP - no browser needed. BoC, BoE and ECB (ICE Euribor) are fully
+automatic. Fed expectations are manual (CME terms forbid scraping): rates.py
+reads them from data/manual/fed/ and exits non-zero when that input is missing
+or stale, so a forgotten FedWatch download surfaces here as a "rates" alert.
+>>>>>>> Stashed changes
 """
 import datetime as dt
 import os

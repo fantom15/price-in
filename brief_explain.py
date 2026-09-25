@@ -22,6 +22,8 @@ import os
 import textwrap
 from collections import defaultdict
 
+import brief as B   # rate_reading: the dated, aged rate reading shared with brief/story
+
 # thresholds (same as brief.py)
 EVENT_WINDOW_DAYS = 7
 PATH_SLAP_BP = 8.0
@@ -67,6 +69,14 @@ def load_cot(p):
         for s in d:
             d[s].sort(key=lambda x: x["report_date"])
     return d
+
+
+def load_prices(p):
+    px = {}
+    if os.path.exists(p):
+        for row in csv.DictReader(open(p)):
+            px[(row["date"], row["series"])] = row
+    return px
 
 
 def f(v):
@@ -122,7 +132,7 @@ def upcoming(cal, date, currencies=None, days=EVENT_WINDOW_DAYS, min_impact="HIG
 
 
 # ── the explanatory brief for one pair ─────────────────────────────────────
-def explain_pair(pair, cfg, date, sheet, cal, cot):
+def explain_pair(pair, cfg, date, sheet, cal, cot, prices):
     today = sheet.get(date, {})
     yest = sheet.get(prev_date(sheet, date), {})
     ccy = cfg["ccy"]
@@ -137,51 +147,67 @@ def explain_pair(pair, cfg, date, sheet, cal, cot):
     out.append("\n① INTEREST-RATE EXPECTATIONS  (what the market has already priced)")
     primary = cfg["banks"][0]
     bank = primary.upper()
-    odds = f(today.get(f"{primary}_odds") or today.get(f"{primary}_odds_pct"))
-    bps = f(today.get(f"{primary}_bps"))
-    path = f(today.get(f"{primary}_path_12m"))
-    ppath = f(yest.get(f"{primary}_path_12m"))
+    rd = B.rate_reading(sheet, date, primary)
+    odds, bps, path, ppath = rd["odds"], rd["bps"], rd["path"], rd["prev_path"]
+    age = ""
+    if rd["as_of"] and rd["age"]:
+        age = (f" (This reading is from {rd['as_of']}, {rd['age']} business "
+               f"day{'s' if rd['age'] != 1 else ''} old — rate data is published "
+               f"with a lag.)")
 
-    if odds is None:
-        out.append(wrap(f"No {bank} rate data available today, so we can't read what "
+    if odds is None and bps is None and path is None:
+        why = f" ({rd['note']})" if rd["note"] else ""
+        out.append(wrap(f"No usable {bank} rate data today{why}, so we can't read what "
                         f"the market expects from the central bank. (Rule: when data "
                         f"is missing, we say so — we never guess.)"))
+    elif odds is None:
+        if bps is not None:
+            out.append(wrap(
+                f"The nearest priced horizon for the {bank} shows {bps:+.1f} basis points "
+                f"of rate change, but it covers more than one meeting, so there is no "
+                f"single-meeting probability to quote.{age}"))
+        else:
+            out.append(wrap(f"No next-meeting reading for the {bank} today.{age}"))
     else:
         out.append(wrap(
             f"The market currently prices a {odds:.0f}% chance that the {bank} (the "
             f"central bank behind the {ccy}) changes interest rates at its next "
             f"meeting. In plain terms: out of 100 possible futures, the market bets "
-            f"{odds:.0f} of them include a rate move."))
-        if path is not None:
-            change = ""
-            if ppath is not None:
-                dp = path - ppath
-                if abs(dp) >= 0.1:
-                    dirw = "harder (more hikes expected)" if dp > 0 else "softer (fewer hikes expected)"
-                    change = (f" Since yesterday this expectation moved {dp:+.1f} — the "
-                              f"outlook got {dirw}.")
-            out.append("")
-            out.append(wrap(
-                f"Looking further out, the market prices about {path:+.0f} basis points "
-                f"of rate change over the next 12 months. (A 'basis point' is one "
-                f"hundredth of a percent; {path:+.0f} basis points ≈ {path/100:+.2f}% of "
-                f"total rate change priced for the year.){change}"))
-        if odds >= LOCKED_ODDS:
-            out.append("")
-            out.append(wrap(
-                f"⚑ This meeting is now 'LOCKED' — over 90% priced. That flips the "
-                f"logic: since the move is almost fully expected, the decision itself "
-                f"won't move the market much. The surprise would be if they do NOT "
-                f"move. When something is this expected, the shock is the miss, not "
-                f"the hit."))
-        if path is not None and ppath is not None and abs(path - ppath) >= PATH_SLAP_BP:
-            flags.append("repricing")
-            out.append("")
-            out.append(wrap(
-                f"⚑ A big shift: the 12-month outlook jumped {path - ppath:+.1f} basis "
-                f"points in a single day. A move this size means a real driver hit — "
-                f"a data release, an oil move, or an official's speech. Something "
-                f"happened; find out what."))
+            f"{odds:.0f} of them include a rate move.{age}"))
+    if path is not None:
+        change = ""
+        if ppath is not None:
+            dp = path - ppath
+            if abs(dp) >= 0.1:
+                dirw = "harder (more hikes expected)" if dp > 0 else "softer (fewer hikes expected)"
+                change = (f" Since the previous reading this expectation moved {dp:+.1f} — "
+                          f"the outlook got {dirw}.")
+        out.append("")
+        out.append(wrap(
+            f"Looking further out, the market prices about {path:+.0f} basis points "
+            f"of rate change over the next 12 months. (A 'basis point' is one "
+            f"hundredth of a percent; {path:+.0f} basis points ≈ {path/100:+.2f}% of "
+            f"total rate change priced for the year.){change}"))
+    if rd["note"] and "withheld" in rd["note"]:
+        out.append("")
+        out.append(wrap(f"⚑ {rd['note']}. A reading from before a decision would "
+                        f"describe a market that no longer exists."))
+    if odds is not None and odds >= LOCKED_ODDS:
+        out.append("")
+        out.append(wrap(
+            f"⚑ This meeting is now 'LOCKED' — over 90% priced. That flips the "
+            f"logic: since the move is almost fully expected, the decision itself "
+            f"won't move the market much. The surprise would be if they do NOT "
+            f"move. When something is this expected, the shock is the miss, not "
+            f"the hit."))
+    if path is not None and ppath is not None and abs(path - ppath) >= PATH_SLAP_BP:
+        flags.append("repricing")
+        out.append("")
+        out.append(wrap(
+            f"⚑ A big shift: the 12-month outlook jumped {path - ppath:+.1f} basis "
+            f"points in a single day. A move this size means a real driver hit — "
+            f"a data release, an oil move, or an official's speech. Something "
+            f"happened; find out what."))
 
     # events
     ev_rel = upcoming(cal, date, cfg["currencies"])
@@ -374,6 +400,7 @@ def main():
     sheet = load_sheet(a.sheet)
     cal = load_calendar(os.path.join(a.datadir, "calendar.csv"))
     cot = load_cot(os.path.join(a.datadir, "cot.csv"))
+    prices = load_prices(os.path.join(a.datadir, "prices.csv"))
     if not sheet:
         raise SystemExit(f"no sheet at {a.sheet} — run build_sheet.py first")
 
@@ -386,7 +413,7 @@ def main():
     print("  Read top to bottom. Every term is explained where it appears.")
     print("╚" + "═" * (W - 2) + "╝")
     for p, cfg in pairs.items():
-        print(explain_pair(p, cfg, date, sheet, cal, cot))
+        print(explain_pair(p, cfg, date, sheet, cal, cot, prices))
     print("\n  Remember: this brief gives you CONTEXT, never a buy/sell order.")
     print("  Direction is your decision, from the chart. This is the ground you")
     print("  stand on — whether today is solid or mined.\n")
