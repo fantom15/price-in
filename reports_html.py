@@ -22,6 +22,7 @@ import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATE_DIR = re.compile(r"\d{4}-\d{2}-\d{2}")
+STORY_FILE = re.compile(r"brief_(en|fa)\.txt")   # make_report.py's saved reports
 
 
 def md_to_html(text):
@@ -85,7 +86,11 @@ def collect(reports_dir):
             if not name.endswith((".txt", ".md")):
                 continue
             text = open(os.path.join(path, name), encoding="utf-8").read()
-            body = (md_to_html(text) if name.endswith(".md")
+            # brief_<lang>.txt is story.py output (the saved report): format it
+            # like a story. Anything else .txt (e.g. an old rules-only brief.txt)
+            # is shown as printed.
+            is_story = name.endswith(".md") or STORY_FILE.fullmatch(name)
+            body = (md_to_html(text) if is_story
                     else f"<pre>{html.escape(text)}</pre>")
             files.append({"name": name, "label": label_for(name),
                           "rtl": "_fa" in name, "html": body})

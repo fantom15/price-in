@@ -108,9 +108,13 @@ def load_rates(path):
     with open(path) as f:
         for r in csv.DictReader(f):
             try:
+                # prob_move_pct is only set on the next-meeting row; rows
+                # further out carry change_bps alone (a probability does not
+                # apply to a multi-meeting horizon), so it may be empty here.
+                prob = r["prob_move_pct"]
                 by_date[r["bank"]][r["as_of"]].append((
                     dt.date.fromisoformat(r["meeting"]),
-                    float(r["prob_move_pct"]),
+                    float(prob) if prob else None,
                     float(r["change_bps"]),
                 ))
             except (ValueError, KeyError):
@@ -128,13 +132,10 @@ def load_rates(path):
             if not upcoming:
                 continue
             _, prob, bps = upcoming[0]
-<<<<<<< Updated upstream
-=======
             # bps = the first priced horizon. prob is set only when that horizon
             # is a single meeting (rates.py); otherwise it stays empty and the
             # bps span more than one decision - e.g. a 3-month Euribor window,
             # or FedWatch history that omits a meeting already past.
->>>>>>> Stashed changes
 
             target = ref + dt.timedelta(days=PATH_HORIZON_DAYS)
             when, _, path_bps = min(upcoming, key=lambda m: abs(m[0] - target))

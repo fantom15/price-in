@@ -111,12 +111,6 @@ yesterday's reading exists. Only the manual ECB input, dated today, lines up.
 (cvol, skew, atm, convexity, skewratio, upvar, downvar). Writes one long-format
 CSV per measure: `ticker,series,date,value`.
 
-<<<<<<< Updated upstream
-**`rates.py`** — pulls market-implied policy-rate paths from
-[rateprobability.com](https://rateprobability.com/) for 6 central banks (fed,
-ecb, boe, boj, boc, rba). Public JSON API, no auth. Writes
-`data/rates.csv` as `bank,as_of,meeting,implied_rate,prob_move_pct,is_cut,num_moves,change_bps,horizon`.
-=======
 **`rates.py`** — market-implied policy-rate paths from official sources (see
 `rates-sources.md`): BoC (Valet CORRA + Montréal Exchange COA/CRA) and BoE
 (SONIA + BoE OIS forward curve) and ECB (deposit rate + ICE Euribor futures)
@@ -124,41 +118,31 @@ fully automatic; Fed (FedWatch buckets + NY Fed target band) with expectations
 entered by hand in `data/manual/fed/`, because CME's terms forbid scripted access. One
 module per bank in `banks/`. Writes `data/rates.csv` as
 `bank,as_of,as_of_time,meeting,implied_rate,prob_move_pct,is_cut,num_moves,change_bps,horizon`.
->>>>>>> Stashed changes
 
 **`build_sheet.py`** — pivots those into the wide template layout, one row per
 date, computing `_chg` as the day-over-day difference per ticker.
 
 ## Run `rates.py` daily
 
-The rate API is a **snapshot, not a time series**. Each response carries today
-plus exactly four backdated snapshots (1w/3w/6w/10w ago), and there is no way to
-request an arbitrary date — `?date=`/`?as_of=` are ignored and other paths fall
-through to the SPA shell.
+Every run archives each raw download to `data/raw/<bank>/<date>.<kind>.<ext>`
+and rebuilds the CSV from the whole archive plus `data/manual/` —
+`python3 rates.py --no-fetch` rebuilds it without touching the network. The
+M-X and BoE sources carry a few days to a month of history per download, so a
+missed day usually heals on the next run; the manual Fed/ECB inputs do not.
+Missing or stale manual input makes `rates.py` exit non-zero (→ Telegram alert).
 
-So history is *accumulated*, not fetched. Every run archives the raw JSON to
-`data/raw/<bank>/<as_of>.json` and rebuilds the CSV from every snapshot ever
-collected. The first run seeds ~10 weeks of sparse history (5 dates per bank);
-coverage becomes dense only for days you actually run it. Miss a day and that
-day is gone permanently.
-
-The archive keeps every field the API returns, not just the ones the sheet uses,
-so new columns can be backfilled later from snapshots already on disk —
-`python3 rates.py --no-fetch` rebuilds the CSV without hitting the network.
+The old rateprobability snapshots (`data/raw/<bank>/<date>.json`, May–Sep
+2026) are still read so that history stays in the CSV.
 
 ## Column coverage
 
 | Columns | Status |
 |---|---|
 | `CAVL`, `EUVL`, `S1VL` + `_chg` + `_skew` | done — QuikStrike |
-<<<<<<< Updated upstream
-| `fed_*`, `ecb_*`, `boc_*` | done — rateprobability, but **sparse** until daily runs accumulate |
-=======
 | `boc_*` | done — Montréal Exchange, automatic |
 | `ecb_*` | done — ICE Euribor, automatic (bps-only: a 3-month window spans ~2 decisions) |
 | `fed_*` | done — needs the daily FedWatch download in `data/manual/fed/` |
 | `boc_path_12m` | done — added as the last column |
->>>>>>> Stashed changes
 | `dxy`, `usdcad`, `eurusd`, `wti` | **not built** — needs a market data source |
 
 Unbuilt columns are emitted empty so the sheet keeps the template's shape. To
@@ -231,6 +215,10 @@ This matters most for `data/raw/`. Those rateprobability snapshots are
 irreplaceable: the API exposes only today plus 1w/3w/6w/10w ago, so a day
 without a run is a permanent gap that cannot be backfilled. Nothing in this
 repo backs that directory up — arrange that on the VPS.
+
+`data/manual/` (the hand-entered Fed/ECB inputs) is under `data/` too, so it
+is not deployed by `git push`: the files must be on whichever machine runs
+`rates.py`.
 
 Deploying does not run anything. Scheduling the daily fetch on the VPS is a
 separate step, still to be set up.

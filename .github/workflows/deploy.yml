@@ -23,7 +23,7 @@ jobs:
           python-version: '3.11'
       # The fetchers are stdlib-only, so there is nothing to install. Compile
       # them so a syntax error is caught here rather than at 06:00 on the VPS.
-      - run: python -m compileall -q quikstrike.py rates.py build_sheet.py
+      - run: python -m compileall -q quikstrike.py rates.py banks build_sheet.py
 
   deploy:
     needs: syntax-check
@@ -46,5 +46,5 @@ jobs:
             git fetch --prune origin
             git reset --hard origin/master
 
-            python3 -m compileall -q rates.py build_sheet.py quikstrike.py
+            python3 -m compileall -q rates.py banks build_sheet.py quikstrike.py
             echo "deployed $(git rev-parse --short HEAD) at $(date -u +%FT%TZ)"
